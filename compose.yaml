@@ -1,0 +1,67 @@
+x-env: &env
+  OSC_DATABASE_URL: postgresql+psycopg://osc:${OSC_DB_PASSWORD:?Run python -m osc.init_config}@db:5432/osc
+  OSC_DATA_DIR: /data
+  OSC_MODEL_PATH: /models/yolox_nano.onnx
+x-backend: &backend
+  build:
+    context: .
+    dockerfile: backend/Dockerfile
+  env_file: .env
+  environment: *env
+  volumes:
+    - osc_data:/data
+    - osc_models:/models
+  restart: unless-stopped
+services:
+  db:
+    image: postgres:16-bookworm
+    environment:
+      POSTGRES_DB: osc
+      POSTGRES_USER: osc
+      POSTGRES_PASSWORD: ${OSC_DB_PASSWORD:?Missing database password}
+    volumes:
+      - osc_db:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U osc -d osc']
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+  api:
+    <<: *backend
+    command: [uvicorn, osc.api:app, --host, 0.0.0.0, --port, '8000']
+    ports: ['127.0.0.1:${OSC_API_PORT:-8000}:8000']
+    depends_on:
+      db: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 5s
+      retries: 20
+  model-init:
+    <<: *backend
+    command: [python, -m, osc.download_model]
+    restart: 'no'
+  collector:
+    <<: *backend
+    command: [python, -m, osc.collector]
+    depends_on:
+      api: {condition: service_healthy}
+  worker:
+    <<: *backend
+    command: [python, -m, osc.worker]
+    depends_on:
+      api: {condition: service_healthy}
+      model-init: {condition: service_completed_successfully}
+  web:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    environment:
+      OSC_BACKEND_URL: http://api:8000
+    ports: ['127.0.0.1:${OSC_WEB_PORT:-3000}:3000']
+    depends_on:
+      api: {condition: service_healthy}
+    restart: unless-stopped
+volumes:
+  osc_db:
+  osc_data:
+  osc_models:
