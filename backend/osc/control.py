@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -18,17 +19,27 @@ def identity(pid):
         return fields[19] if fields[0]!='Z' else None
     except (OSError,IndexError):return None
 
+def application_process(cwd,args):
+    if not args:return False
+    backend=cwd==ROOT/'backend' and any(args[i:i+3] in (['-m','osc.run','api'],['-m','osc.run','worker'],['-m','osc.run','collector']) for i in range(len(args)-2))
+    next_command='start' in args and any(Path(a).name=='next' or '/next/dist/bin/next' in a for a in args)
+    web=cwd==ROOT/'frontend' and (args[0].startswith(('npm run start','next-server')) or next_command)
+    return backend or web
+
 def legacy_processes():
     found=[]
     for p in Path('/proc').iterdir():
         if not p.name.isdigit() or int(p.name)==os.getpid():continue
         try:
             cwd=(p/'cwd').resolve();args=(p/'cmdline').read_bytes().decode().split('\0')
-            backend=cwd==ROOT/'backend' and any(args[i:i+2]==['-m','osc.run'] for i in range(len(args)-1)) and any(a in ('api','collector','worker') for a in args)
-            web=cwd==ROOT/'frontend' and (args[0].startswith(('npm run start','next-server')) or (any('/next/' in a for a in args) and 'start' in args))
-            if backend or web:found.append((int(p.name),identity(int(p.name))))
+            if application_process(cwd,args):found.append((int(p.name),identity(int(p.name))))
         except (OSError,UnicodeError):pass
     return found
+
+def require_free_port(host,port):
+    try:
+        with socket.socket() as probe:probe.bind((host,int(port)))
+    except OSError:raise SystemExit(f'Port {port} is already occupied. No new services started. Use restart --replace for this application, or choose a free OSC_WEB_PORT.') from None
 
 def stop(replace=False):
     managed=json.loads(STATE.read_text()) if STATE.exists() else {}
@@ -54,6 +65,8 @@ def start(public=False,replace=False):
     if public and (not os.getenv('OSC_PRESENTATION_USERNAME') or len(os.getenv('OSC_PRESENTATION_PASSWORD',''))<12):raise SystemExit('Run node scripts/presentation-access.cjs first.')
     if not (ROOT/'frontend'/'.next'/'BUILD_ID').is_file():raise SystemExit('Build frontend first: npm ci && npm run build')
     env=os.environ.copy();api_port=env.get('OSC_API_PORT','8000');web_port=env.get('OSC_WEB_PORT','3000')
+    require_free_port('127.0.0.1',api_port)
+    require_free_port('0.0.0.0' if public else '127.0.0.1',web_port)
     env['OSC_BACKEND_URL']=f'http://127.0.0.1:{api_port}';env['NEXT_TELEMETRY_DISABLED']='1';env.setdefault('NODE_OPTIONS','--max-old-space-size=768')
     manifest={};logs=ROOT/'logs';logs.mkdir(exist_ok=True);STATE.parent.mkdir(exist_ok=True)
     try:
