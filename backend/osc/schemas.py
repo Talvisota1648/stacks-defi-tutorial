@@ -1,6 +1,6 @@
 import re
 from typing import Literal
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, model_validator, SecretStr
 
 class Rule(BaseModel):
     id: str = Field(pattern=r'^[a-zA-Z0-9_-]{1,60}$')
@@ -19,6 +19,7 @@ class SourceCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     kind: Literal['rtsp', 'upload']
     source_env: str = ''
+    rtsp_url: SecretStr | None = None
     enabled: bool = False
     sample_fps: float = Field(default=0.5, ge=0.2, le=5)
     latitude: float | None = Field(default=None, ge=-90, le=90)
@@ -26,11 +27,27 @@ class SourceCreate(BaseModel):
     rules: list[Rule] = Field(default_factory=list, max_length=20)
     @model_validator(mode='after')
     def valid(self):
-        if self.kind == 'rtsp' and not re.fullmatch(r'CAMERA_[A-Z0-9_]+_URL', self.source_env): raise ValueError('Нужно имя переменной CAMERA_01_URL, а не адрес или пароль камеры')
+        if self.rtsp_url:
+            check_rtsp(self.rtsp_url.get_secret_value())
+        if self.kind == 'rtsp' and not self.rtsp_url and not re.fullmatch(r'CAMERA_[A-Z0-9_]+_URL', self.source_env): raise ValueError('Нужно имя переменной CAMERA_01_URL, а не адрес или пароль камеры')
         if (self.latitude is None) != (self.longitude is None): raise ValueError('Нужны обе координаты')
         if len({r.id for r in self.rules}) != len(self.rules): raise ValueError('ID правил не должны повторяться')
         return self
+def check_rtsp(value):
+    from urllib.parse import urlsplit
+    try:
+        url=urlsplit(value)
+        if url.scheme not in ('rtsp','rtsps') or not url.hostname or url.fragment or any(c in value for c in '\r\n\0') or len(value)>2048:raise ValueError()
+        _=url.port
+    except ValueError:raise ValueError('Нужна корректная RTSP-ссылка без метки #') from None
+
 class SourceUpdate(BaseModel):
+    rtsp_url: SecretStr | None = None
+    @model_validator(mode='after')
+    def url_valid(self):
+        if self.rtsp_url:check_rtsp(self.rtsp_url.get_secret_value())
+        return self
+
     enabled: bool | None = None
     rules: list[Rule] | None = Field(default=None, max_length=20)
     sample_fps: float | None = Field(default=None, ge=0.2, le=5)

@@ -1,0 +1,10 @@
+import { useEffect, useState } from 'react'
+type Frame = { id: string; captured_at: number }
+export default function CameraGallery({ sourceId }: { sourceId: string }) {
+  const [frames, setFrames] = useState<Frame[]>([]), [expanded, setExpanded] = useState(false), [selected, setSelected] = useState<Frame | null>(null)
+  useEffect(() => { let live = true; const refresh = () => fetch(`/api/v2/sources/${sourceId}/frames`).then(r => r.ok ? r.json() : []).then(data => { if (live) setFrames(data) }).catch(() => {}); refresh(); const timer = setInterval(refresh, 5000); return () => { live = false; clearInterval(timer) } }, [sourceId])
+  useEffect(() => { const escape = (e: KeyboardEvent) => { if (e.key === 'Escape') setSelected(null) }; window.addEventListener('keydown', escape); return () => window.removeEventListener('keydown', escape) }, [])
+  const url = (f: Frame) => `/api/v2/sources/${sourceId}/frames/${f.id}`
+  const date = (f: Frame) => new Date(f.captured_at * 1000).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' }) + ' МСК'
+  return <div className="camera-gallery">{frames[0] ? <><button className="camera-preview" onClick={() => setSelected(frames[0])}><img src={url(frames[0])} alt="Последний обработанный кадр камеры" /><span>{date(frames[0])}</span></button><button className="text-button" onClick={() => setExpanded(!expanded)}>{expanded ? 'Свернуть кадры' : `Последние ${frames.length} кадров`}</button>{expanded && <div className="camera-strip">{frames.map(f => <button key={f.id} onClick={() => setSelected(f)}><img src={url(f)} alt={`Кадр ${date(f)}`} loading="lazy" /><small>{date(f)}</small></button>)}</div>}<small className="plate-disclaimer">Это обработанные кадры, не прямая трансляция. Время помогает проверить свежесть.</small></> : <p>Ждём первый обработанный кадр камеры.</p>}{selected && <div className="image-modal" role="dialog" aria-modal="true" aria-label="Кадр камеры"><button className="secondary-button" onClick={() => setSelected(null)}>Закрыть ×</button><img src={url(selected)} alt="Увеличенный кадр камеры" /><p>{date(selected)}</p></div>}</div>
+}

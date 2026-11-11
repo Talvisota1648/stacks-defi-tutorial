@@ -124,3 +124,47 @@ def path_for(relative):
     path = (DATA / relative).resolve()
     if not path.is_relative_to(DATA): raise ValueError('Invalid evidence path')
     return path
+
+class CameraFrame(Base):
+    __tablename__ = 'camera_frames'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    source_id: Mapped[str] = mapped_column(ForeignKey('sources.id'), index=True)
+    captured_at: Mapped[float] = mapped_column(Float)
+    path: Mapped[str] = mapped_column(Text)
+    sha256: Mapped[str] = mapped_column(String(64))
+    created: Mapped[float] = mapped_column(Float, default=time.time)
+
+class ManualAnalysis(Base):
+    __tablename__ = 'manual_analyses'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    filename: Mapped[str] = mapped_column(String(200))
+    media_type: Mapped[str] = mapped_column(String(10))
+    provider: Mapped[str] = mapped_column(String(20))
+    path: Mapped[str] = mapped_column(Text)
+    sha256: Mapped[str] = mapped_column(String(64))
+    region: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(20), default='queued')
+    result: Mapped[dict] = mapped_column(JSON, default=dict)
+    error: Mapped[str] = mapped_column(String(300), default='')
+    owner: Mapped[str] = mapped_column(String(80), default='')
+    lease: Mapped[float] = mapped_column(Float, default=0)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    created: Mapped[float] = mapped_column(Float, default=time.time)
+    finished: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+class Setting(Base):
+    __tablename__ = 'settings'
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    value: Mapped[str] = mapped_column(Text)
+
+class CameraConnection(Base):
+    __tablename__ = 'camera_connections'
+    source_id: Mapped[str] = mapped_column(ForeignKey('sources.id'), primary_key=True)
+    ciphertext: Mapped[str] = mapped_column(Text, default='')
+    revision: Mapped[str] = mapped_column(String(36))
+
+class LoginAttempt(Base):
+    __tablename__ = 'login_attempts'
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    started: Mapped[float] = mapped_column(Float)
+    count: Mapped[int] = mapped_column(Integer, default=0)

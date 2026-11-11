@@ -6,9 +6,11 @@ import time
 import uuid
 import cv2
 from sqlalchemy import select
-from .db import init_db,transaction,Session,Source,Job,Incident,EvidenceLink,DATA,path_for,heartbeat
+from .db import init_db,transaction,Session,Source,Job,Incident,EvidenceLink,ManualAnalysis,DATA,path_for,heartbeat
 from .detector import Detector,MODEL_SHA256
 from .rules import evaluate
+from .gallery import save_frame
+from .manual import claim_manual, process_manual
 
 LEASE=120
 
@@ -41,6 +43,7 @@ def process(job,source,detector,owner):
             preview_temp=preview_folder/f'{source.id}-{owner}.jpg'
             if cv2.imwrite(str(preview_temp),frame):preview_temp.replace(preview_folder/f'{source.id}.jpg')
             detections=detector.detect(frame)
+            save_frame(source.id,frame,job.captured_at+offset)
             state,found=evaluate(source.rules,state,detections,job.captured_at+offset,max(3,2.5/source.sample_fps))
             for event in found:
                 event_id=str(uuid.uuid4());folder=DATA/'frames';folder.mkdir(exist_ok=True)
@@ -92,14 +95,32 @@ def main():
     for sig in (signal.SIGTERM,signal.SIGINT):signal.signal(sig,lambda *_:stop.set())
     try:detector=Detector()
     except Exception:
-        heartbeat(owner,'worker',{'status':'model_error','error':'Model missing, checksum invalid or inference provider unavailable'});raise
-    last_cleanup=0
+        detector=None
+        heartbeat(owner,'worker',{'status':'model_error','error':'Model missing, checksum invalid or inference provider unavailable'})
+    last_cleanup=0;manual_turn=True
     while not stop.is_set():
-        heartbeat(owner,'worker',{'model':'YOLOX Nano','provider':detector.provider,'status':'ready'})
-        task=claim(owner)
-        if task:
+        details={'model':'YOLOX Nano','provider':detector.provider,'status':'ready'} if detector else {'status':'model_error','error':'Локальная модель недоступна. OpenRouter может работать независимо.'}
+        heartbeat(owner,'worker',details)
+        manual=claim_manual(owner,detector is not None) if manual_turn or not detector else None
+        task=claim(owner) if detector and not manual else None
+        if not manual and not task:manual=claim_manual(owner,detector is not None)
+        if manual:
+            pulse_stop=threading.Event()
+            def pulse():
+                while not pulse_stop.wait(10):
+                    with transaction() as s:
+                        row=s.get(ManualAnalysis,manual.id)
+                        if row.owner!=owner or row.status!='processing':return
+                        row.lease=time.time()+180
+                    heartbeat(owner,'worker',{**details,'analysis_provider':manual.provider})
+            thread=threading.Thread(target=pulse,daemon=True);thread.start()
+            try:process_manual(manual,detector,owner)
+            finally:pulse_stop.set();thread.join(timeout=2)
+            manual_turn=False
+        elif task:
             try:process(*task,detector,owner)
             except Exception:fail(task[0],owner)
+            manual_turn=True
         else:stop.wait(1)
         if time.time()-last_cleanup>60:cleanup();last_cleanup=time.time()
 if __name__=='__main__':main()

@@ -2,16 +2,19 @@ import os
 import sys
 from pathlib import Path
 
-def main():
+def load_env():
     path=Path(__file__).resolve().parents[2]/'.env'
     if path.exists():
         for line in path.read_text().splitlines():
             if line.strip() and not line.lstrip().startswith('#') and '=' in line:
                 key,value=line.split('=',1);os.environ.setdefault(key.strip(),value.strip())
+
+def main():
+    load_env()
     role=sys.argv[1] if len(sys.argv)>1 else ''
     if role=='api':
         import uvicorn
-        uvicorn.run('osc.api:app',host='127.0.0.1',port=8000)
+        uvicorn.run('osc.api:app',host='127.0.0.1',port=int(os.getenv('OSC_API_PORT','8000')))
     elif role=='worker':
         from .worker import main
         main()

@@ -9,10 +9,12 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
   const target = new URL(`/api/v2/${parts.map(encodeURIComponent).join('/')}`, base)
   for (const [key, value] of Object.entries(req.query)) if (key !== 'path' && typeof value === 'string') target.searchParams.set(key, value)
   const headers: Record<string, string> = {}
-  for (const key of ['authorization', 'content-type', 'content-length', 'range']) if (typeof req.headers[key] === 'string') headers[key] = req.headers[key] as string
+  for (const key of ['authorization', 'content-type', 'content-length', 'range', 'cookie', 'origin', 'sec-fetch-site']) if (typeof req.headers[key] === 'string') headers[key] = req.headers[key] as string
+  headers['x-forwarded-host'] = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim()
+  headers['x-forwarded-proto'] = String(req.headers['x-forwarded-proto'] || ((req.socket as any).encrypted ? 'https' : 'http')).split(',')[0].trim()
   const upstream = (target.protocol === 'https:' ? https : http).request(target, { method: req.method, headers }, response => {
     res.statusCode = response.statusCode || 502
-    for (const key of ['content-type', 'content-length', 'content-range', 'accept-ranges', 'x-content-sha256']) if (response.headers[key]) res.setHeader(key, response.headers[key]!)
+    for (const key of ['content-type', 'content-length', 'content-range', 'accept-ranges', 'x-content-sha256', 'set-cookie']) if (response.headers[key]) res.setHeader(key, response.headers[key]!)
     res.setHeader('Cache-Control', 'no-store')
     response.pipe(res)
   })

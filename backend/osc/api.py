@@ -7,10 +7,10 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from fastapi import FastAPI, Depends, HTTPException, Header, UploadFile, File, Form, Query
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, Depends, HTTPException, Header, Request, UploadFile, File, Form, Query
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import select, func, update
-from .db import init_db, Session, transaction, Source, Job, Incident, Outbox, Audit, Heartbeat, DATA, path_for
+from .db import init_db, Session, transaction, Source, Job, Incident, Outbox, Audit, Heartbeat, ManualAnalysis, CameraConnection, DATA, path_for
 from .schemas import SourceCreate, SourceUpdate, Review
 
 @asynccontextmanager
@@ -19,8 +19,12 @@ async def lifespan(app):
     yield
 app = FastAPI(title='ОСЦ MVP 2.0', version='2.0.0', lifespan=lifespan)
 
-def actor(authorization: str = Header(default='')):
-    if not authorization.startswith('Bearer '): raise HTTPException(401, 'Требуется Bearer-токен')
+def actor(request: Request, authorization: str = Header(default='')):
+    from .auth import session_role
+    if not authorization.startswith('Bearer '):
+        role=session_role(request)
+        if role:return role
+        raise HTTPException(401, 'Требуется вход на сайт или Bearer-токен')
     token = authorization[7:]
     for role in ('admin','reviewer','ingest','integration'):
         expected = os.getenv(f'OSC_{role.upper()}_TOKEN', '')
@@ -41,7 +45,7 @@ def source_json(s):
 def event_json(e):
     return {k:getattr(e,k) for k in ('id','source_id','job_id','rule_id','track_id','category','description','detected_at','evidence','location','status','version','reviewer','comment','reviewed_at')}
 def capacity(s):
-    if s.scalar(select(func.count()).select_from(Job).where(Job.status.in_(['queued','processing']))) >= int(os.getenv('OSC_MAX_QUEUE','300')): raise HTTPException(429,'Очередь заполнена; повторите позже')
+    if s.scalar(select(func.count()).select_from(Job).where(Job.status.in_(['queued','processing']))) + s.scalar(select(func.count()).select_from(ManualAnalysis).where(ManualAnalysis.status.in_(['queued','processing']))) >= int(os.getenv('OSC_MAX_QUEUE','300')): raise HTTPException(429,'Очередь заполнена; повторите позже')
     if shutil.disk_usage(DATA).free < int(os.getenv('OSC_MIN_FREE_MB','512'))*1024**2: raise HTTPException(507,'Недостаточно места для материалов')
 
 @app.get('/health')
@@ -49,7 +53,7 @@ def health(): return {'service':'osc-api','version':'2.0.0'}
 @app.get('/api/v2/status')
 def status(user=Depends(view)):
     with Session() as s:
-        return {'role':user, 'sources':s.scalar(select(func.count()).select_from(Source)), 'pending':s.scalar(select(func.count()).select_from(Incident).where(Incident.status=='pending')), 'queue':s.scalar(select(func.count()).select_from(Job).where(Job.status.in_(['queued','processing']))), 'failed_jobs':s.scalar(select(func.count()).select_from(Job).where(Job.status=='failed')), 'processes':[{'id':h.id,'role':h.role,'online':time.time()-h.seen<45,'last_seen':h.seen,'details':h.details} for h in s.scalars(select(Heartbeat))], 'source_limit':10}
+        return {'role':user, 'sources':s.scalar(select(func.count()).select_from(Source)), 'pending':s.scalar(select(func.count()).select_from(Incident).where(Incident.status=='pending')), 'queue':s.scalar(select(func.count()).select_from(Job).where(Job.status.in_(['queued','processing'])))+s.scalar(select(func.count()).select_from(ManualAnalysis).where(ManualAnalysis.status.in_(['queued','processing']))), 'failed_jobs':s.scalar(select(func.count()).select_from(Job).where(Job.status=='failed')), 'processes':[{'id':h.id,'role':h.role,'online':time.time()-h.seen<45,'last_seen':h.seen,'details':h.details} for h in s.scalars(select(Heartbeat))], 'source_limit':10}
 @app.get('/api/v2/sources')
 def sources(user=Depends(view)):
     with Session() as s: return [source_json(row) for row in s.scalars(select(Source).order_by(Source.created))]
@@ -57,14 +61,27 @@ def sources(user=Depends(view)):
 def add_source(body:SourceCreate,user=Depends(manage)):
     with transaction() as s:
         if s.scalar(select(func.count()).select_from(Source)) >= 10: raise HTTPException(409,'Пилот ограничен десятью источниками')
-        row=Source(id=str(uuid.uuid4()),**body.model_dump(),status='connecting' if body.enabled else 'disabled')
-        s.add(row);s.flush();s.add(Audit(actor=user,action='source_created',entity=row.id));return source_json(row)
+        values=body.model_dump();url=values.pop('rtsp_url',None)
+        if url:values['source_env']=''
+        row=Source(id=str(uuid.uuid4()),**values,status='connecting' if body.enabled else 'disabled')
+        s.add(row);s.flush()
+        if url:
+            from .settings import encrypt
+            s.add(CameraConnection(source_id=row.id,ciphertext=encrypt(url.get_secret_value()),revision=str(uuid.uuid4())))
+        s.add(Audit(actor=user,action='source_created',entity=row.id));return source_json(row)
 @app.patch('/api/v2/sources/{source_id}')
 def edit_source(source_id:str,body:SourceUpdate,user=Depends(manage)):
     with transaction() as s:
         row=s.get(Source,source_id)
         if not row: raise HTTPException(404,'Источник не найден')
         values=body.model_dump(exclude_none=True)
+        url=values.pop('rtsp_url',None)
+        if url:
+            if row.kind!='rtsp':raise HTTPException(422,'Адрес можно задать только RTSP-источнику')
+            from .settings import encrypt
+            connection=s.get(CameraConnection,source_id)
+            if not connection:connection=CameraConnection(source_id=source_id);s.add(connection)
+            connection.ciphertext=encrypt(url.get_secret_value());connection.revision=str(uuid.uuid4());row.source_env='';row.status='connecting';row.error=''
         if 'rules' in values:
             if len({r['id'] for r in values['rules']}) != len(values['rules']): raise HTTPException(422,'ID правил повторяются')
             row.rule_state={}
@@ -154,3 +171,15 @@ def preview(source_id:str,user=Depends(view)):
     path=path_for(f'previews/{source_id}.jpg')
     if not path.is_file():raise HTTPException(404,'Первый кадр ещё не обработан')
     return FileResponse(path,media_type='image/jpeg',headers={'Cache-Control':'no-store'})
+
+from .extra_api import router as extra_router
+app.include_router(extra_router)
+
+@app.middleware('http')
+async def upload_auth_guard(request,call_next):
+    if request.method=='POST' and (request.url.path.endswith('/uploads') or request.url.path=='/api/v2/analyses'):
+        try:actor(request,request.headers.get('authorization',''))
+        except HTTPException as error:return JSONResponse(status_code=error.status_code,content={'detail':error.detail})
+        length=request.headers.get('content-length')
+        if length and (not length.isdigit() or int(length)>251*1024**2):return JSONResponse(status_code=413,content={'detail':'Максимальный размер запроса — 251 МБ'})
+    return await call_next(request)

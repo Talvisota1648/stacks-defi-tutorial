@@ -8,7 +8,7 @@ import threading
 import time
 import uuid
 from sqlalchemy import select,func
-from .db import init_db,Session,transaction,Source,Job,DATA,heartbeat
+from .db import init_db,Session,transaction,Source,Job,DATA,heartbeat,CameraConnection
 
 stop=threading.Event()
 def queue_clip(source_id,path,captured_at,key):
@@ -32,7 +32,13 @@ def read_segments(path,offset):
     return rows,offset
 
 def capture(source,owner):
-    url=os.getenv(source.source_env,'')
+    with Session() as s:
+        connection=s.get(CameraConnection,source.id)
+        revision=connection.revision if connection else ''
+        if connection and connection.ciphertext:
+            from .settings import decrypt
+            url=decrypt(connection.ciphertext)
+        else:url=os.getenv(source.source_env,'')
     if not url.startswith(('rtsp://','rtsps://')):raise RuntimeError('source_missing')
     folder=DATA/'captures'/source.id/str(uuid.uuid4());folder.mkdir(parents=True,exist_ok=True)
     listing=folder/'segments.csv';began=time.time();processed=set();offset=0;last_segment=time.monotonic()
@@ -43,6 +49,8 @@ def capture(source,owner):
         while not stop.wait(1):
             with transaction() as s:
                 row=s.get(Source,source.id)
+                current=s.get(CameraConnection,source.id)
+                if (current.revision if current else '')!=revision:return
                 if not row.enabled or row.collector_owner!=owner:return
                 row.collector_lease=time.time()+30
             if listing.exists():
