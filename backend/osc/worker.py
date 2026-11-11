@@ -6,11 +6,13 @@ import time
 import uuid
 import cv2
 from sqlalchemy import select
-from .db import init_db,transaction,Session,Source,Job,Incident,EvidenceLink,ManualAnalysis,JobAnalysis,SourceArchive,DATA,path_for,heartbeat
+from .db import init_db,transaction,Session,Source,Job,Incident,EvidenceLink,ManualAnalysis,JobAnalysis,SourceArchive,CameraSceneState,DATA,path_for,heartbeat
 from .detector import Detector,MODEL_SHA256
 from .rules import evaluate
 from .gallery import save_frame
 from .manual import claim_manual, process_manual
+from .camera_scene import analyse_camera
+from .scene_policy import CATALOG
 
 LEASE=120
 
@@ -59,7 +61,7 @@ def process(job,source,detector,owner):
                 image_id=f'f{len(report_frames)}';report_path=report_folder/f'{image_id}.jpg'
                 if not cv2.imwrite(str(report_path),annotated):raise RuntimeError('Cannot save analysis result')
                 report_files.append(report_path)
-                report_frames.append({'id':image_id,'offset':round(offset,3),'captured_at':job.captured_at+offset,'detections':detections,'path':str(report_path.relative_to(DATA)),'sha256':hashlib.sha256(report_path.read_bytes()).hexdigest()})
+                report_frames.append({'id':image_id,'offset':round(offset,3),'captured_at':job.captured_at+offset,'detections':detections,'width':annotated.shape[1],'height':annotated.shape[0],'path':str(report_path.relative_to(DATA)),'sha256':hashlib.sha256(report_path.read_bytes()).hexdigest()})
             save_frame(source.id,frame,job.captured_at+offset)
             state,found=evaluate(source.rules,state,detections,job.captured_at+offset,max(3,2.5/source.sample_fps))
             for event in found:
@@ -74,6 +76,27 @@ def process(job,source,detector,owner):
                     row.lease=time.time()+LEASE;src.worker_lease=row.lease
                 heartbeat(owner,'worker',{'model':'YOLOX Nano','provider':detector.provider,'status':'processing'});last_renew=time.monotonic()
         if not index:raise RuntimeError('No video frames decoded')
+        scene_report,candidates=analyse_camera(job,source,report_frames,owner)
+        for observation,view in candidates:
+            event_id=str(uuid.uuid4());folder=DATA/'frames';folder.mkdir(exist_ok=True);frame_path=folder/f'{event_id}.jpg'
+            image=cv2.imread(str(path_for(view['path'])));h,w=image.shape[:2]
+            box=observation.get('bbox')
+            if box:
+                x1,y1,x2,y2=box;cv2.rectangle(image,(int(x1*w),int(y1*h)),(int(x2*w),int(y2*h)),(40,40,235),max(2,w//400))
+                cv2.putText(image,'SCENE SIGNAL: '+observation['category'],(int(x1*w),max(20,int(y1*h)-8)),cv2.FONT_HERSHEY_SIMPLEX,.55,(40,40,235),2)
+            if not cv2.imwrite(str(frame_path),image):raise RuntimeError('Cannot save scene evidence')
+            events.append((event_id,{'rule_id':'scene-'+observation['category'],'track_id':str(uuid.uuid4()),'category':observation['category'],'dwell_seconds':0,'scene':observation,'detection':{'bbox':box,'label':CATALOG[observation['category']],'score':None}},frame_path,view['offset']))
+
+        for view in report_frames:
+            alerts=[o for o in scene_report.get('observations',[]) if o.get('camera_frame_id')==view['id'] and o['suspected_violation'] and o.get('bbox')]
+            if not alerts:continue
+            image=cv2.imread(str(path_for(view['path'])));h,w=image.shape[:2]
+            for o in alerts:
+                x1,y1,x2,y2=o['bbox'];left,top=int(x1*w),int(y1*h)
+                cv2.rectangle(image,(left,top),(int(x2*w),int(y2*h)),(40,40,235),max(2,w//400))
+                cv2.putText(image,'SCENE SIGNAL: '+o['category'],(left,max(20,top-8)),cv2.FONT_HERSHEY_SIMPLEX,.55,(40,40,235),2)
+            if not cv2.imwrite(str(path_for(view['path'])),image):raise RuntimeError('Cannot annotate report frame')
+            view['sha256']=hashlib.sha256(path_for(view['path']).read_bytes()).hexdigest()
         with transaction() as s:
             row=s.get(Job,job.id);src=s.get(Source,source.id)
             if row.owner!=owner or src.worker_owner!=owner or not src.enabled or src.rules!=source.rules:raise RuntimeError('Lease lost or source configuration changed')
@@ -85,14 +108,18 @@ def process(job,source,detector,owner):
                 context_items=[{'job_id':c.id,'path':c.path,'sha256':c.sha256,'captured_at':c.captured_at} for c in context]
                 evidence={'frame':{'path':str(frame_path.relative_to(DATA)),'sha256':hashlib.sha256(frame_path.read_bytes()).hexdigest()},'clip':{'path':job.path,'sha256':job.sha256},'frame_offset':offset,'bbox':event['detection']['bbox'],'detector_score':event['detection']['score'],'label':event['detection']['label'],'model':'YOLOX Nano','model_sha256':MODEL_SHA256,'dwell_seconds':event['dwell_seconds'],'timing':'server_ingest_or_uploader_time','context_clips':context_items}
                 description=('Автомобиль длительно находится в заданной ограниченной зоне.' if event['category']=='vehicle_dwell' else 'Человек присутствует в заданной ограниченной зоне.')+' Предварительный сигнал: проверьте разметку зоны, правила участка и обстоятельства. Квалификация нарушения не установлена.'
+                if event.get('scene'):
+                    evidence.update(analysis_kind='scene',model=scene_report['model'],model_sha256=None,severity=event['scene']['severity'])
+                    description=event['scene']['description']+' Предварительный сигнал ИИ. Требуется проверка специалистом.'
                 s.add(Incident(id=event_id,source_id=source.id,job_id=job.id,rule_id=event['rule_id'],track_id=event['track_id'],category=event['category'],description=description,detected_at=job.captured_at+offset,evidence=evidence,location=job.location or {'latitude':source.latitude,'longitude':source.longitude,'origin':'source_configuration'}))
                 s.flush()
                 for c in context:s.add(EvidenceLink(incident_id=event_id,job_id=c.id))
-            report={'model':'YOLOX Nano','sample_fps':source.sample_fps,'analysed_frames':analysed,'duration':count/fps,'peak_objects':peaks,'object_observations':observations,'frames':report_frames,'signals':len(events),'note':'Количество наблюдений суммируется по кадрам, это не число уникальных людей или машин. Наличие объекта само по себе не является нарушением.'}
+            report={'model':'YOLOX Nano','sample_fps':source.sample_fps,'analysed_frames':analysed,'duration':count/fps,'peak_objects':peaks,'object_observations':observations,'frames':report_frames,'signals':len(events),'scene':{k:v for k,v in scene_report.items() if k!='cooldown_updates'},'note':'Количество наблюдений суммируется по кадрам, это не число уникальных людей или машин. Наличие объекта само по себе не является нарушением.'}
             saved=s.get(JobAnalysis,job.id)
             if saved:saved.result=report
             else:s.add(JobAnalysis(job_id=job.id,result=report))
-            row.status='done';row.lease=0;row.error='';src.rule_state=state if src.sample_fps==source.sample_fps else {};src.worker_lease=0;src.worker_owner=''
+            if 'cooldown_updates' in scene_report:s.get(CameraSceneState,source.id).recent=scene_report['cooldown_updates']
+            row.status='done';row.lease=0;row.error=scene_report.get('error','');src.rule_state=state if src.sample_fps==source.sample_fps else {};src.worker_lease=0;src.worker_owner=''
     except BaseException:
         for _,_,p,_ in events:p.unlink(missing_ok=True)
         for p in report_files:p.unlink(missing_ok=True)

@@ -100,7 +100,10 @@ async def create_analysis(file:UploadFile=File(...),provider:str=Form('local'),r
     except BaseException:path.unlink(missing_ok=True);raise
     finally:await file.close()
 
-def analysis_json(row):return {k:getattr(row,k) for k in ('id','filename','media_type','provider','status','result','error','created','finished')}
+def analysis_json(row):
+    data={k:getattr(row,k) for k in ('id','filename','media_type','provider','status','result','error','created','finished')}
+    if row.status!='done':data['result']=None
+    return data
 @router.get('/analyses')
 def analyses(user=Depends(view)):
     with Session() as s:return [dict(id=r.id,filename=r.filename,provider=r.provider,status=r.status,created=r.created,error=r.error) for r in s.scalars(select(ManualAnalysis).order_by(ManualAnalysis.created.desc()).limit(20))]
@@ -176,3 +179,21 @@ def job_image(job_id:str,image_id:str,user=Depends(view)):
         if not path.is_file():raise HTTPException(410,'Срок хранения кадра истёк')
         if hashlib.sha256(path.read_bytes()).hexdigest()!=item['sha256']:raise HTTPException(409,'Контрольная сумма не совпала')
         return FileResponse(path,media_type='image/jpeg',headers={'Cache-Control':'no-store'})
+
+from .scene_policy import ScenePolicy, CATALOG, policy
+
+@router.get('/settings/scene-policy')
+def scene_settings(user=Depends(view)):
+    config=policy()
+    if user!='admin':config.pop('local_url',None)
+    return {'policy':config,'catalog':CATALOG}
+
+@router.put('/settings/scene-policy')
+def save_scene_settings(body:ScenePolicy,user=Depends(manage)):
+    if body.camera_enabled and body.provider=='openrouter' and not openrouter_settings()[0]:raise HTTPException(409,'Сначала настройте ключ OpenRouter')
+    with transaction() as s:
+        row=s.get(Setting,'scene_policy')
+        if row:row.value=body.model_dump_json()
+        else:s.add(Setting(id='scene_policy',value=body.model_dump_json()))
+        s.add(Audit(actor=user,action='scene_policy_updated',entity='scene-policy',details={'camera_enabled':body.camera_enabled,'provider':body.provider,'enabled_types':body.enabled_types}))
+    return {'ok':True}

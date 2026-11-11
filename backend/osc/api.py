@@ -46,6 +46,8 @@ def event_json(e):
     result={k:getattr(e,k) for k in ('id','source_id','job_id','rule_id','track_id','category','description','detected_at','evidence','location','status','version','reviewer','comment','reviewed_at')}
     with Session() as s:
         source=s.get(Source,e.source_id);result['source_name']=source.name if source else 'Архивный источник'
+    from .scene_policy import CATALOG
+    result['category_name']=CATALOG.get(e.category, 'Автомобиль в ограниченной зоне' if e.category=='vehicle_dwell' else 'Человек в ограниченной зоне')
     return result
 def capacity(s):
     if s.scalar(select(func.count()).select_from(Job).where(Job.status.in_(['queued','processing']))) + s.scalar(select(func.count()).select_from(ManualAnalysis).where(ManualAnalysis.status.in_(['queued','processing']))) >= int(os.getenv('OSC_MAX_QUEUE','300')): raise HTTPException(429,'Очередь заполнена; повторите позже')

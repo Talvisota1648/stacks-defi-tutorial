@@ -1,3 +1,4 @@
+const { normalizeTask } = require('../lib/report-view.cjs')
 import { AppShell } from '../components/Interface'
 import Head from 'next/head'
 import { useEffect, useRef, useState } from 'react'
@@ -6,7 +7,7 @@ import type { Region } from '../lib/analysis'
 
 type ImageFrame = {
   id: string
-  timestamp: number
+  timestamp: number | null
   width: number
   height: number
 }
@@ -18,6 +19,7 @@ type Task = {
   error: string
   created: number
   result?: {
+    scene_analysis?: string
     summary: string
     model: string
     plate_comparison?: { variants: string[]; status: string }
@@ -27,6 +29,8 @@ type Task = {
     observations: {
       frame_id: string
       description: string
+      category?: string
+      severity?: string
       suspected_violation: boolean
     }[]
     readings: { frame_id: string; number: string; readability: string }[]
@@ -47,6 +51,7 @@ export default function Manual() {
   const [role, setRole] = useState(''),
     [provider, setProvider] = useState('local'),
     [configured, setConfigured] = useState(false),
+    [localScenes, setLocalScenes] = useState(false),
     [file, setFile] = useState<File | null>(null),
     [url, setUrl] = useState('')
   const [task, setTask] = useState<Task | null>(null),
@@ -69,12 +74,15 @@ export default function Manual() {
           ? data.detail
           : 'Не удалось выполнить запрос'
       )
-    return data
+    return path.startsWith('analyses/') ? normalizeTask(data) : data
   }
   useEffect(() => {
     request('status')
       .then((s) => setRole(s.role))
       .catch(() => setRole('unauthorized'))
+    request('settings/scene-policy')
+      .then((s) => setLocalScenes(s.policy.local_enabled))
+      .catch(() => {})
     request('settings/openrouter')
       .then((s) => setConfigured(s.configured))
       .catch(() => {})
@@ -167,7 +175,7 @@ export default function Manual() {
   const processing = task && ['queued', 'processing'].includes(task.status)
   const result = task?.result
   const displayed =
-    result?.frames.filter((f) =>
+    result?.frames?.filter((f) =>
       task?.provider === 'local' ? f.id.startsWith('a') : true
     ) || []
   return (
@@ -350,8 +358,9 @@ export default function Manual() {
                       />
                       <strong>Локальная модель</strong>
                       <small>
-                        Без платного API. Люди, автомобили, автобусы, грузовики
-                        и мотоциклы.
+                        {localScenes
+                          ? 'Объекты и анализ сцен через подключённую локальную vision-модель.'
+                          : 'Только объекты: люди и транспорт. Повреждения и аварии не оцениваются.'}
                       </small>
                     </label>
                     <label>
@@ -372,7 +381,9 @@ export default function Manual() {
                   </div>
                   <p className="plate-disclaimer">
                     {provider === 'local'
-                      ? 'YOLOX Nano распознаёт объекты и отмечает их рамками. Само наличие машины не является нарушением. Чтение номеров и распознавание свалок этой моделью не выполняются.'
+                      ? localScenes
+                        ? 'Локальный анализ включает YOLOX Nano и подключённую vision-модель. Проверяются сценарии аварий и нарушений из настроек. Качество и скорость зависят от модели.'
+                        : 'YOLOX Nano распознаёт объекты и отмечает их рамками. Само наличие машины не является нарушением. Чтение номеров и распознавание свалок этой моделью не выполняются.'
                       : configured
                       ? 'Ключ настроен. Фото или выборка до 12 изображений отправятся в OpenRouter. При необходимости выделите номер.'
                       : 'Ключ пока не настроен. Администратор может добавить его в настройках сайта без перезапуска.'}
@@ -428,6 +439,13 @@ export default function Manual() {
                     </button>
                   </div>
                   <p className="result-summary">{result.summary}</p>
+                  {result.scene_analysis === 'unsupported' && (
+                    <p className="v2-warning">
+                      Анализ аварий и нарушений не выполнялся: YOLOX Nano
+                      распознаёт только объекты. Выберите OpenRouter или
+                      подключите локальную vision-модель в настройках.
+                    </p>
+                  )}
                   <p className="plate-disclaimer">
                     Модель: {result.model}. Изображений сцены:{' '}
                     {result.frame_count}. Это наблюдения для проверки, не
@@ -448,8 +466,19 @@ export default function Manual() {
                     </p>
                   )}
                   {result.observations?.map((o, i) => (
-                    <article className="finding" key={i}>
-                      <strong>{o.frame_id}</strong>
+                    <article
+                      className={`finding ${
+                        o.suspected_violation ? 'finding-alert' : ''
+                      }`}
+                      key={i}
+                    >
+                      <strong>
+                        {o.suspected_violation
+                          ? '⚠ Сигнал для проверки · '
+                          : 'Наблюдение · '}
+                        {o.frame_id}
+                        {o.severity === 'critical' ? ' · Срочно' : ''}
+                      </strong>
                       <p>{o.description}</p>
                       <small>
                         {o.suspected_violation
@@ -478,7 +507,11 @@ export default function Manual() {
                         </a>
                         <figcaption>
                           <strong>
-                            {frame.id} · {frame.timestamp.toFixed(1)} с
+                            {frame.id} ·{' '}
+                            {typeof frame.timestamp === 'number'
+                              ? frame.timestamp.toFixed(1)
+                              : '—'}{' '}
+                            с
                           </strong>
                           <small>
                             {frame.width}×{frame.height} px

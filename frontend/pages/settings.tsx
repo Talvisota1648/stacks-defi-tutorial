@@ -1,3 +1,4 @@
+import ScenePolicyEditor from '../components/ScenePolicyEditor'
 import { AppShell } from '../components/Interface'
 import Head from 'next/head'
 import { FormEvent, useEffect, useState } from 'react'
@@ -147,6 +148,7 @@ export default function Settings() {
               </p>
             )}
           </section>
+          {role === 'admin' && <ScenePolicyEditor />}
           {role === 'admin' && (
             <section className="panel v2-section">
               <h2>Доступ для презентации</h2>

@@ -178,3 +178,9 @@ class JobAnalysis(Base):
     __tablename__ = 'job_analyses'
     job_id: Mapped[str] = mapped_column(ForeignKey('jobs.id'), primary_key=True)
     result: Mapped[dict] = mapped_column(JSON, default=dict)
+
+class CameraSceneState(Base):
+    __tablename__='camera_scene_states'
+    source_id: Mapped[str] = mapped_column(ForeignKey('sources.id'), primary_key=True)
+    next_attempt: Mapped[float] = mapped_column(Float, default=0)
+    recent: Mapped[dict] = mapped_column(JSON, default=dict)

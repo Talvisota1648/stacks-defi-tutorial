@@ -25,6 +25,7 @@ type Source = {
   rules: Rule[]
 }
 type Incident = {
+  category_name?: string
   source_name?: string
   id: string
   source_id: string
@@ -40,7 +41,9 @@ type Incident = {
     label: string
     dwell_seconds: number
     model: string
-    detector_score: number
+    analysis_kind?: string
+    severity?: string
+    detector_score: number | null
     frame: { sha256: string }
     clip: { sha256: string }
     context_clips?: { captured_at: number }[]
@@ -808,9 +811,10 @@ export default function Control() {
                             {statusText[event.status]}
                           </span>
                           <strong>
-                            {event.category === 'vehicle_dwell'
-                              ? 'Автомобиль в ограниченной зоне'
-                              : 'Человек в ограниченной зоне'}
+                            {event.category_name ||
+                              (event.category === 'vehicle_dwell'
+                                ? 'Автомобиль в ограниченной зоне'
+                                : 'Человек в ограниченной зоне')}
                           </strong>
                           <small>
                             {event.source_name ||
@@ -842,9 +846,10 @@ export default function Control() {
                         </span>
                       </div>
                       <h3>
-                        {selected.category === 'vehicle_dwell'
-                          ? 'Нахождение автомобиля в зоне'
-                          : 'Присутствие человека в зоне'}
+                        {selected.category_name ||
+                          (selected.category === 'vehicle_dwell'
+                            ? 'Нахождение автомобиля в зоне'
+                            : 'Присутствие человека в зоне')}
                       </h3>
                       <p className="plate-disclaimer">{selected.description}</p>
                       {frameImage && (
@@ -858,21 +863,32 @@ export default function Control() {
                         <span>
                           Объект<strong>{selected.evidence.label}</strong>
                         </span>
-                        <span>
-                          Длительность
-                          <strong>
-                            {selected.evidence.dwell_seconds.toFixed(1)} с
-                          </strong>
-                        </span>
-                        <span>
-                          Оценка детектора
-                          <strong>
-                            {(selected.evidence.detector_score * 100).toFixed(
-                              0
-                            )}
-                            %
-                          </strong>
-                        </span>
+                        {selected.evidence.analysis_kind !== 'scene' && (
+                          <span>
+                            Длительность
+                            <strong>
+                              {selected.evidence.dwell_seconds.toFixed(1)} с
+                            </strong>
+                          </span>
+                        )}
+                        {typeof selected.evidence.detector_score ===
+                          'number' && (
+                          <span>
+                            Оценка детектора
+                            <strong>
+                              {(selected.evidence.detector_score * 100).toFixed(
+                                0
+                              )}
+                              %
+                            </strong>
+                          </span>
+                        )}
+                        {selected.evidence.analysis_kind === 'scene' && (
+                          <span>
+                            Модель сцены
+                            <strong>{selected.evidence.model}</strong>
+                          </span>
+                        )}
                       </div>
                       <p className="fine-print">
                         Оценка относится к распознаванию объекта, а не к
@@ -1448,6 +1464,36 @@ export default function Control() {
                   автомобиля или человека само по себе не означает нарушение.
                   Частота: {report.result.sample_fps} кадр/с.
                 </p>
+                <h3>Проверка аварий и нарушений</h3>
+                {report.result.scene?.status === 'completed' ? (
+                  <>
+                    <p className="fine-print">
+                      Модель: {report.result.scene.model}. Проверено
+                      изображений: {report.result.scene.analysed_frames}. Повтор
+                      похожих сигналов в одной области ограничен на 5 минут.
+                    </p>
+                    <p>{report.result.scene.summary}</p>
+                    {report.result.scene.observations
+                      ?.filter((o: any) => o.suspected_violation)
+                      .map((o: any, i: number) => (
+                        <article className="scene-observation" key={i}>
+                          <strong>
+                            {o.severity === 'critical' ? 'Срочно · ' : ''}Сигнал
+                            для проверки · {o.frame_id}
+                          </strong>
+                          <p>{o.description}</p>
+                        </article>
+                      ))}
+                  </>
+                ) : (
+                  <p className="scene-report-error">
+                    {report.result.scene?.status === 'failed'
+                      ? report.result.scene.error
+                      : report.result.scene?.status === 'interval'
+                      ? 'В этом клипе анализ сцены не выполнялся: действует интервал проверки камеры. Это не означает отсутствия опасности.'
+                      : 'Анализ аварий и нарушений не выполнялся. Включите проверку сцен с камер в настройках. YOLOX Nano распознаёт только объекты.'}
+                  </p>
+                )}
                 <h3>Кадры анализа</h3>
                 <p className="fine-print">
                   До 12 кадров клипа с рамками обнаруженных объектов. Полный
