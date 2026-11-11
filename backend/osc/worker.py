@@ -6,7 +6,7 @@ import time
 import uuid
 import cv2
 from sqlalchemy import select
-from .db import init_db,transaction,Session,Source,Job,Incident,EvidenceLink,ManualAnalysis,DATA,path_for,heartbeat
+from .db import init_db,transaction,Session,Source,Job,Incident,EvidenceLink,ManualAnalysis,JobAnalysis,SourceArchive,DATA,path_for,heartbeat
 from .detector import Detector,MODEL_SHA256
 from .rules import evaluate
 from .gallery import save_frame
@@ -19,7 +19,7 @@ def claim(owner):
     with transaction() as s:
         for expired in s.scalars(select(Job).where(Job.status=='processing',Job.lease<now,Job.attempts>=3)):
             expired.status='failed';expired.error='Рабочий процесс прерван после трёх попыток';expired.lease=0
-        rows=s.execute(select(Job,Source).join(Source,Job.source_id==Source.id).where(Source.enabled==True,Source.worker_lease<now,((Job.status=='queued')|((Job.status=='processing')&(Job.lease<now))),Job.attempts<3).order_by(Job.created).limit(1)).first()
+        rows=s.execute(select(Job,Source).join(Source,Job.source_id==Source.id).where(Source.enabled==True,~select(SourceArchive.source_id).where(SourceArchive.source_id==Source.id).exists(),Source.worker_lease<now,((Job.status=='queued')|((Job.status=='processing')&(Job.lease<now))),Job.attempts<3).order_by(Job.created).limit(1)).first()
         if not rows:return None
         job,source=rows;job.status='processing';job.attempts+=1;job.owner=owner;job.lease=now+LEASE
         source.worker_owner=owner;source.worker_lease=now+LEASE
@@ -32,6 +32,8 @@ def process(job,source,detector,owner):
     if not cap.isOpened() or not 0<fps<=240 or not 0<count/fps<=120:
         cap.release();raise RuntimeError('Unreadable video or duration exceeds 120 seconds')
     state=source.rule_state if source.kind=='rtsp' else {};events=[];index=0;next_sample=0.;last_renew=time.monotonic()
+    report_frames=[];report_files=[];peaks={};observations={};analysed=0;next_report=0.;report_interval=max(1/source.sample_fps,count/fps/12)
+    report_folder=DATA/'job_results'/job.id;report_folder.mkdir(parents=True,exist_ok=True)
     try:
         while cap.grab():
             offset=index/fps;index+=1
@@ -43,6 +45,21 @@ def process(job,source,detector,owner):
             preview_temp=preview_folder/f'{source.id}-{owner}.jpg'
             if cv2.imwrite(str(preview_temp),frame):preview_temp.replace(preview_folder/f'{source.id}.jpg')
             detections=detector.detect(frame)
+            analysed+=1
+            counts={}
+            for d in detections:counts[d['label']]=counts.get(d['label'],0)+1
+            for label,n in counts.items():peaks[label]=max(peaks.get(label,0),n);observations[label]=observations.get(label,0)+n
+            if offset+0.0001>=next_report and len(report_frames)<12:
+                next_report=offset+report_interval
+                h,w=frame.shape[:2];annotated=frame.copy()
+                for d in detections:
+                    x1,y1,x2,y2=d['bbox'];cv2.rectangle(annotated,(int(x1*w),int(y1*h)),(int(x2*w),int(y2*h)),(60,160,240),max(1,w//500))
+                    cv2.putText(annotated,f"{d['label']} {d['score']:.2f}",(int(x1*w),max(16,int(y1*h)-8)),cv2.FONT_HERSHEY_SIMPLEX,.6,(60,160,240),2)
+                scale=min(1,1280/max(w,h));annotated=cv2.resize(annotated,(max(1,round(w*scale)),max(1,round(h*scale))))
+                image_id=f'f{len(report_frames)}';report_path=report_folder/f'{image_id}.jpg'
+                if not cv2.imwrite(str(report_path),annotated):raise RuntimeError('Cannot save analysis result')
+                report_files.append(report_path)
+                report_frames.append({'id':image_id,'offset':round(offset,3),'captured_at':job.captured_at+offset,'detections':detections,'path':str(report_path.relative_to(DATA)),'sha256':hashlib.sha256(report_path.read_bytes()).hexdigest()})
             save_frame(source.id,frame,job.captured_at+offset)
             state,found=evaluate(source.rules,state,detections,job.captured_at+offset,max(3,2.5/source.sample_fps))
             for event in found:
@@ -71,9 +88,14 @@ def process(job,source,detector,owner):
                 s.add(Incident(id=event_id,source_id=source.id,job_id=job.id,rule_id=event['rule_id'],track_id=event['track_id'],category=event['category'],description=description,detected_at=job.captured_at+offset,evidence=evidence,location=job.location or {'latitude':source.latitude,'longitude':source.longitude,'origin':'source_configuration'}))
                 s.flush()
                 for c in context:s.add(EvidenceLink(incident_id=event_id,job_id=c.id))
-            row.status='done';row.lease=0;row.error='';src.rule_state=state;src.worker_lease=0;src.worker_owner=''
+            report={'model':'YOLOX Nano','sample_fps':source.sample_fps,'analysed_frames':analysed,'duration':count/fps,'peak_objects':peaks,'object_observations':observations,'frames':report_frames,'signals':len(events),'note':'Количество наблюдений суммируется по кадрам, это не число уникальных людей или машин. Наличие объекта само по себе не является нарушением.'}
+            saved=s.get(JobAnalysis,job.id)
+            if saved:saved.result=report
+            else:s.add(JobAnalysis(job_id=job.id,result=report))
+            row.status='done';row.lease=0;row.error='';src.rule_state=state if src.sample_fps==source.sample_fps else {};src.worker_lease=0;src.worker_owner=''
     except BaseException:
         for _,_,p,_ in events:p.unlink(missing_ok=True)
+        for p in report_files:p.unlink(missing_ok=True)
         raise
     finally:cap.release()
 
@@ -81,14 +103,19 @@ def fail(job,owner):
     with transaction() as s:
         row=s.get(Job,job.id);source=s.get(Source,job.source_id)
         if row.owner==owner:
-            row.status='failed';row.error='Не удалось обработать клип: проверьте формат, длительность до 120 с, целостность и состояние модели';row.lease=0
+            row.status='cancelled' if s.get(SourceArchive,source.id) else 'failed';row.error='Не удалось обработать клип: проверьте формат, длительность до 120 с, целостность и состояние модели';row.lease=0
         if source.worker_owner==owner:source.worker_owner='';source.worker_lease=0
 
 def cleanup():
     cutoff=time.time()-float(os.getenv('OSC_UNEVENTFUL_RETENTION_HOURS','24'))*3600
     with transaction() as s:
         rows=s.scalars(select(Job).where(Job.status=='done',Job.created<cutoff,~select(Incident.id).where(Incident.job_id==Job.id).exists(),~select(EvidenceLink.incident_id).where(EvidenceLink.job_id==Job.id).exists()).limit(100)).all()
-        for job in rows:path_for(job.path).unlink(missing_ok=True);job.status='purged'
+        for job in rows:
+            path_for(job.path).unlink(missing_ok=True);job.status='purged'
+            report=s.get(JobAnalysis,job.id)
+            if report:
+                for f in report.result.get('frames',[]):path_for(f['path']).unlink(missing_ok=True)
+                s.delete(report)
 
 def main():
     init_db();owner='worker-'+str(uuid.uuid4());stop=threading.Event()

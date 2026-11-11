@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, R
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, SecretStr, model_validator
 from sqlalchemy import select
-from .db import Session, transaction, CameraFrame, Source, ManualAnalysis, Setting, CameraConnection, Audit, DATA, path_for
+from .db import Session, transaction, CameraFrame, Source, ManualAnalysis, Setting, CameraConnection, SourceArchive, Audit, DATA, path_for
 from .api import view, manage, capacity
 from . import auth
 from .settings import encrypt, openrouter_settings
@@ -37,6 +37,7 @@ def reconnect(source_id:str,user=Depends(manage)):
     with transaction() as s:
         row=s.get(Source,source_id)
         if not row or row.kind!='rtsp':raise HTTPException(404,'RTSP-источник не найден')
+        if s.get(SourceArchive,source_id):raise HTTPException(410,'Камера удалена; добавьте новое подключение')
         connection=s.get(CameraConnection,source_id)
         if not connection:connection=CameraConnection(source_id=source_id,ciphertext='');s.add(connection)
         connection.revision=str(uuid.uuid4());row.enabled=True;row.status='connecting';row.error=''
@@ -139,3 +140,39 @@ def presentation_save(body:PresentationSettings,user=Depends(manage)):
             else:s.add(Setting(id=name,value=value))
         s.add(Audit(actor=user,action='presentation_access_updated',entity='presentation',details={'username':body.username}))
     return {'ok':True}
+
+@router.delete('/sources/{source_id}')
+def archive_source(source_id:str,user=Depends(manage)):
+    from .db import SourceArchive,Job
+    with transaction() as s:
+        row=s.get(Source,source_id)
+        if not row:raise HTTPException(404,'Источник не найден')
+        if not s.get(SourceArchive,source_id):
+            s.add(SourceArchive(source_id=source_id));row.enabled=False;row.status='archived';row.error='';row.rule_state={}
+            for job in s.scalars(select(Job).where(Job.source_id==source_id,Job.status=='queued')):job.status='cancelled';job.error='Камера удалена'
+            connection=s.get(CameraConnection,source_id)
+            if connection:s.delete(connection)
+            s.add(Audit(actor=user,action='source_archived',entity=source_id,details={'evidence_preserved':True}))
+    return {'ok':True,'evidence_preserved':True}
+
+@router.get('/jobs/{job_id}/result')
+def job_result(job_id:str,user=Depends(view)):
+    from .db import Job,JobAnalysis
+    with Session() as s:
+        row=s.get(Job,job_id)
+        if not row:raise HTTPException(404,'Задание не найдено')
+        if row.status=='purged':raise HTTPException(410,'Срок хранения клипа без происшествия истёк')
+        source=s.get(Source,row.source_id);report=s.get(JobAnalysis,job_id)
+        return {'id':row.id,'source_id':row.source_id,'source_name':source.name if source else 'Архивный источник','status':row.status,'error':row.error,'captured_at':row.captured_at,'result':report.result if report else None}
+
+@router.get('/jobs/{job_id}/images/{image_id}')
+def job_image(job_id:str,image_id:str,user=Depends(view)):
+    from .db import JobAnalysis
+    with Session() as s:
+        report=s.get(JobAnalysis,job_id)
+        item=next((f for f in report.result.get('frames',[]) if f['id']==image_id),None) if report else None
+        if not item:raise HTTPException(404,'Изображение не найдено')
+        path=path_for(item['path'])
+        if not path.is_file():raise HTTPException(410,'Срок хранения кадра истёк')
+        if hashlib.sha256(path.read_bytes()).hexdigest()!=item['sha256']:raise HTTPException(409,'Контрольная сумма не совпала')
+        return FileResponse(path,media_type='image/jpeg',headers={'Cache-Control':'no-store'})

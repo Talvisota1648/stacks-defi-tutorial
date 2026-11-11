@@ -168,3 +168,13 @@ class LoginAttempt(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     started: Mapped[float] = mapped_column(Float)
     count: Mapped[int] = mapped_column(Integer, default=0)
+
+class SourceArchive(Base):
+    __tablename__ = 'source_archives'
+    source_id: Mapped[str] = mapped_column(ForeignKey('sources.id'), primary_key=True)
+    archived_at: Mapped[float] = mapped_column(Float, default=time.time)
+
+class JobAnalysis(Base):
+    __tablename__ = 'job_analyses'
+    job_id: Mapped[str] = mapped_column(ForeignKey('jobs.id'), primary_key=True)
+    result: Mapped[dict] = mapped_column(JSON, default=dict)

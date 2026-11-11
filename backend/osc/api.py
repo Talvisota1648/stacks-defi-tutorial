@@ -10,7 +10,7 @@ from pathlib import Path
 from fastapi import FastAPI, Depends, HTTPException, Header, Request, UploadFile, File, Form, Query
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import select, func, update
-from .db import init_db, Session, transaction, Source, Job, Incident, Outbox, Audit, Heartbeat, ManualAnalysis, CameraConnection, DATA, path_for
+from .db import init_db, Session, transaction, Source, Job, Incident, Outbox, Audit, Heartbeat, ManualAnalysis, CameraConnection, SourceArchive, DATA, path_for
 from .schemas import SourceCreate, SourceUpdate, Review
 
 @asynccontextmanager
@@ -43,7 +43,10 @@ def source_json(s):
     if s.enabled and s.kind=='rtsp' and s.status=='online' and s.last_frame and time.time()-s.last_frame>30:result['status']='stalled'
     return result
 def event_json(e):
-    return {k:getattr(e,k) for k in ('id','source_id','job_id','rule_id','track_id','category','description','detected_at','evidence','location','status','version','reviewer','comment','reviewed_at')}
+    result={k:getattr(e,k) for k in ('id','source_id','job_id','rule_id','track_id','category','description','detected_at','evidence','location','status','version','reviewer','comment','reviewed_at')}
+    with Session() as s:
+        source=s.get(Source,e.source_id);result['source_name']=source.name if source else 'Архивный источник'
+    return result
 def capacity(s):
     if s.scalar(select(func.count()).select_from(Job).where(Job.status.in_(['queued','processing']))) + s.scalar(select(func.count()).select_from(ManualAnalysis).where(ManualAnalysis.status.in_(['queued','processing']))) >= int(os.getenv('OSC_MAX_QUEUE','300')): raise HTTPException(429,'Очередь заполнена; повторите позже')
     if shutil.disk_usage(DATA).free < int(os.getenv('OSC_MIN_FREE_MB','512'))*1024**2: raise HTTPException(507,'Недостаточно места для материалов')
@@ -53,14 +56,14 @@ def health(): return {'service':'osc-api','version':'2.0.0'}
 @app.get('/api/v2/status')
 def status(user=Depends(view)):
     with Session() as s:
-        return {'role':user, 'sources':s.scalar(select(func.count()).select_from(Source)), 'pending':s.scalar(select(func.count()).select_from(Incident).where(Incident.status=='pending')), 'queue':s.scalar(select(func.count()).select_from(Job).where(Job.status.in_(['queued','processing'])))+s.scalar(select(func.count()).select_from(ManualAnalysis).where(ManualAnalysis.status.in_(['queued','processing']))), 'failed_jobs':s.scalar(select(func.count()).select_from(Job).where(Job.status=='failed')), 'processes':[{'id':h.id,'role':h.role,'online':time.time()-h.seen<45,'last_seen':h.seen,'details':h.details} for h in s.scalars(select(Heartbeat))], 'source_limit':10}
+        return {'role':user, 'sources':s.scalar(select(func.count()).select_from(Source).where(~select(SourceArchive.source_id).where(SourceArchive.source_id==Source.id).exists())), 'pending':s.scalar(select(func.count()).select_from(Incident).where(Incident.status=='pending')), 'queue':s.scalar(select(func.count()).select_from(Job).where(Job.status.in_(['queued','processing'])))+s.scalar(select(func.count()).select_from(ManualAnalysis).where(ManualAnalysis.status.in_(['queued','processing']))), 'failed_jobs':s.scalar(select(func.count()).select_from(Job).where(Job.status=='failed')), 'processes':[{'id':h.id,'role':h.role,'online':time.time()-h.seen<45,'last_seen':h.seen,'details':h.details} for h in s.scalars(select(Heartbeat))], 'source_limit':10}
 @app.get('/api/v2/sources')
 def sources(user=Depends(view)):
-    with Session() as s: return [source_json(row) for row in s.scalars(select(Source).order_by(Source.created))]
+    with Session() as s: return [source_json(row) for row in s.scalars(select(Source).where(~select(SourceArchive.source_id).where(SourceArchive.source_id==Source.id).exists()).order_by(Source.created))]
 @app.post('/api/v2/sources', status_code=201)
 def add_source(body:SourceCreate,user=Depends(manage)):
     with transaction() as s:
-        if s.scalar(select(func.count()).select_from(Source)) >= 10: raise HTTPException(409,'Пилот ограничен десятью источниками')
+        if s.scalar(select(func.count()).select_from(Source).where(~select(SourceArchive.source_id).where(SourceArchive.source_id==Source.id).exists())) >= 10: raise HTTPException(409,'Пилот ограничен десятью источниками')
         values=body.model_dump();url=values.pop('rtsp_url',None)
         if url:values['source_env']=''
         row=Source(id=str(uuid.uuid4()),**values,status='connecting' if body.enabled else 'disabled')
@@ -74,6 +77,7 @@ def edit_source(source_id:str,body:SourceUpdate,user=Depends(manage)):
     with transaction() as s:
         row=s.get(Source,source_id)
         if not row: raise HTTPException(404,'Источник не найден')
+        if s.get(SourceArchive,source_id):raise HTTPException(410,'Источник удалён; материалы сохранены в архиве')
         values=body.model_dump(exclude_none=True)
         url=values.pop('rtsp_url',None)
         if url:
@@ -82,6 +86,7 @@ def edit_source(source_id:str,body:SourceUpdate,user=Depends(manage)):
             connection=s.get(CameraConnection,source_id)
             if not connection:connection=CameraConnection(source_id=source_id);s.add(connection)
             connection.ciphertext=encrypt(url.get_secret_value());connection.revision=str(uuid.uuid4());row.source_env='';row.status='connecting';row.error=''
+        if 'sample_fps' in values:row.rule_state={}
         if 'rules' in values:
             if len({r['id'] for r in values['rules']}) != len(values['rules']): raise HTTPException(422,'ID правил повторяются')
             row.rule_state={}

@@ -17,3 +17,14 @@ def test_existing_listener_cannot_be_mistaken_for_a_new_healthy_service():
         listener.bind(('127.0.0.1',0));listener.listen()
         with pytest.raises(SystemExit,match='already occupied'):
             require_free_port('0.0.0.0',listener.getsockname()[1])
+
+def test_closed_connection_time_wait_does_not_block_restart():
+    with socket.socket() as listener:
+        listener.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+        listener.bind(('127.0.0.1',0));listener.listen()
+        port=listener.getsockname()[1]
+        with socket.create_connection(('127.0.0.1',port)) as client:
+            connection,_=listener.accept()
+            connection.close()
+            assert client.recv(1)==b''
+    require_free_port('127.0.0.1',port)

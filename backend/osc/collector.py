@@ -8,7 +8,7 @@ import threading
 import time
 import uuid
 from sqlalchemy import select,func
-from .db import init_db,Session,transaction,Source,Job,DATA,heartbeat,CameraConnection
+from .db import init_db,Session,transaction,Source,Job,DATA,heartbeat,CameraConnection,SourceArchive
 
 stop=threading.Event()
 def queue_clip(source_id,path,captured_at,key):
@@ -94,7 +94,7 @@ def main():
     while not stop.wait(1):
         heartbeat(owner,'collector',{'status':'ready','active_streams':sum(t.is_alive() for t in threads.values())})
         with transaction() as s:
-            sources=s.scalars(select(Source).where(Source.enabled==True,Source.kind=='rtsp',Source.collector_lease<time.time())).all()
+            sources=s.scalars(select(Source).where(Source.enabled==True,Source.kind=='rtsp',~select(SourceArchive.source_id).where(SourceArchive.source_id==Source.id).exists(),Source.collector_lease<time.time())).all()
             for source in sources:
                 if (source.id in threads and threads[source.id].is_alive()) or time.time()<retry.get(source.id,0):continue
                 source.collector_owner=owner;source.collector_lease=time.time()+30;source.status='connecting';retry[source.id]=time.time()+15

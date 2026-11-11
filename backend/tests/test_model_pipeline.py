@@ -41,3 +41,10 @@ def test_ten_sources_real_cpu_inference_review_export(client,headers,tmp_path):
     decision=client.post(f"/api/v2/events/{events[0]['id']}/review",headers=headers,json={'decision':'approved','version':1,'comment':'Verified test event'})
     assert decision.status_code==200
     assert len(client.get('/integration/v1/events',headers=headers).json()['items'])==1
+    archived=events[0]['source_id']
+    assert client.delete('/api/v2/sources/'+archived,headers=headers).status_code==200
+    assert len(client.get('/api/v2/sources',headers=headers).json())==9
+    assert len(client.get('/api/v2/events?status=all',headers=headers).json())==10
+    assert client.get(f"/api/v2/events/{events[0]['id']}/evidence/frame",headers=headers).status_code==200
+    assert client.get(f"/api/v2/jobs/{events[0]['job_id']}/result",headers=headers).json()['result']['signals']==1
+    assert len(client.get('/integration/v1/events',headers=headers).json()['items'])==1

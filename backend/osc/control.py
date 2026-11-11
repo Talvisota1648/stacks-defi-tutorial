@@ -38,7 +38,9 @@ def legacy_processes():
 
 def require_free_port(host,port):
     try:
-        with socket.socket() as probe:probe.bind((host,int(port)))
+        with socket.socket() as probe:
+            probe.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+            probe.bind((host,int(port)))
     except OSError:raise SystemExit(f'Port {port} is already occupied. No new services started. Use restart --replace for this application, or choose a free OSC_WEB_PORT.') from None
 
 def stop(replace=False):
