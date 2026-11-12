@@ -102,7 +102,7 @@ async def create_analysis(file:UploadFile=File(...),provider:str=Form('local'),r
 
 def analysis_json(row):
     data={k:getattr(row,k) for k in ('id','filename','media_type','provider','status','result','error','created','finished')}
-    if row.status!='done':data['result']=None
+    if row.status not in ('done','purged'):data['result']=None
     return data
 @router.get('/analyses')
 def analyses(user=Depends(view)):
@@ -117,6 +117,7 @@ def analysis(task_id:str,user=Depends(view)):
 def analysis_image(task_id:str,image_id:str,user=Depends(view)):
     with Session() as s:
         row=s.get(ManualAnalysis,task_id)
+        if row and row.status=='purged':raise HTTPException(410,'Материалы удалены автоматической очисткой')
         item=next((f for f in row.result.get('frames',[]) if f['id']==image_id),None) if row else None
         if not item:raise HTTPException(404,'Изображение не найдено')
         path=path_for(item['path'])
@@ -197,3 +198,15 @@ def save_scene_settings(body:ScenePolicy,user=Depends(manage)):
         else:s.add(Setting(id='scene_policy',value=body.model_dump_json()))
         s.add(Audit(actor=user,action='scene_policy_updated',entity='scene-policy',details={'camera_enabled':body.camera_enabled,'provider':body.provider,'enabled_types':body.enabled_types}))
     return {'ok':True}
+
+
+@router.get('/maintenance/storage')
+def storage_status(user=Depends(manage)):
+    from .storage import status
+    return status()
+
+@router.post('/maintenance/cleanup')
+def storage_cleanup(user=Depends(manage)):
+    from .storage import cleanup
+    try:return cleanup(emergency=True)
+    except OSError:raise HTTPException(503,'Очистка не завершена. Проверьте свободное место и права на каталог данных.') from None

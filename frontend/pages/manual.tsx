@@ -41,6 +41,7 @@ const labels: Record<string, string> = {
   processing: 'Анализируется',
   done: 'Готово',
   failed: 'Ошибка',
+  purged: 'Материалы удалены',
   person: 'Человек',
   car: 'Автомобиль',
   bus: 'Автобус',
@@ -420,7 +421,7 @@ export default function Manual() {
                   {error}
                 </div>
               )}
-              {task?.status === 'failed' && (
+              {task && ['failed', 'purged'].includes(task.status) && (
                 <div className="error-message" role="alert">
                   {task.error}
                 </div>

@@ -114,7 +114,7 @@ def process(job,source,detector,owner):
                 s.add(Incident(id=event_id,source_id=source.id,job_id=job.id,rule_id=event['rule_id'],track_id=event['track_id'],category=event['category'],description=description,detected_at=job.captured_at+offset,evidence=evidence,location=job.location or {'latitude':source.latitude,'longitude':source.longitude,'origin':'source_configuration'}))
                 s.flush()
                 for c in context:s.add(EvidenceLink(incident_id=event_id,job_id=c.id))
-            report={'model':'YOLOX Nano','sample_fps':source.sample_fps,'analysed_frames':analysed,'duration':count/fps,'peak_objects':peaks,'object_observations':observations,'frames':report_frames,'signals':len(events),'scene':{k:v for k,v in scene_report.items() if k!='cooldown_updates'},'note':'Количество наблюдений суммируется по кадрам, это не число уникальных людей или машин. Наличие объекта само по себе не является нарушением.'}
+            report={'completed_at':time.time(),'model':'YOLOX Nano','sample_fps':source.sample_fps,'analysed_frames':analysed,'duration':count/fps,'peak_objects':peaks,'object_observations':observations,'frames':report_frames,'signals':len(events),'scene':{k:v for k,v in scene_report.items() if k!='cooldown_updates'},'note':'Количество наблюдений суммируется по кадрам, это не число уникальных людей или машин. Наличие объекта само по себе не является нарушением.'}
             saved=s.get(JobAnalysis,job.id)
             if saved:saved.result=report
             else:s.add(JobAnalysis(job_id=job.id,result=report))
@@ -134,15 +134,8 @@ def fail(job,owner):
         if source.worker_owner==owner:source.worker_owner='';source.worker_lease=0
 
 def cleanup():
-    cutoff=time.time()-float(os.getenv('OSC_UNEVENTFUL_RETENTION_HOURS','24'))*3600
-    with transaction() as s:
-        rows=s.scalars(select(Job).where(Job.status=='done',Job.created<cutoff,~select(Incident.id).where(Incident.job_id==Job.id).exists(),~select(EvidenceLink.incident_id).where(EvidenceLink.job_id==Job.id).exists()).limit(100)).all()
-        for job in rows:
-            path_for(job.path).unlink(missing_ok=True);job.status='purged'
-            report=s.get(JobAnalysis,job.id)
-            if report:
-                for f in report.result.get('frames',[]):path_for(f['path']).unlink(missing_ok=True)
-                s.delete(report)
+    from .storage import cleanup as clean_storage
+    return clean_storage()
 
 def main():
     init_db();owner='worker-'+str(uuid.uuid4());stop=threading.Event()
@@ -176,5 +169,8 @@ def main():
             except Exception:fail(task[0],owner)
             manual_turn=True
         else:stop.wait(1)
-        if time.time()-last_cleanup>60:cleanup();last_cleanup=time.time()
+        if time.time()-last_cleanup>60:
+            try:cleanup()
+            except Exception:print('Storage cleanup failed; will retry',flush=True)
+            last_cleanup=time.time()
 if __name__=='__main__':main()

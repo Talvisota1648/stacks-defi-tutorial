@@ -1,3 +1,4 @@
+import StorageSettings from '../components/StorageSettings'
 import ScenePolicyEditor from '../components/ScenePolicyEditor'
 import { AppShell } from '../components/Interface'
 import Head from 'next/head'
@@ -148,6 +149,7 @@ export default function Settings() {
               </p>
             )}
           </section>
+          {role === 'admin' && <StorageSettings />}
           {role === 'admin' && <ScenePolicyEditor />}
           {role === 'admin' && (
             <section className="panel v2-section">

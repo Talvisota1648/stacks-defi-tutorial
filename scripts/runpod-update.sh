@@ -6,6 +6,10 @@ if [ -f /workspace/miniforge3/etc/profile.d/conda.sh ]; then
   source /workspace/miniforge3/etc/profile.d/conda.sh
   conda activate osc
 fi
+# Free old processed material before npm/pip/build need additional disk space.
+if python -c 'import sqlalchemy' >/dev/null 2>&1; then
+  (cd backend && python -m osc.storage --emergency)
+fi
 python -m pip install -r backend/requirements.txt
 node scripts/init-env.cjs
 node scripts/presentation-access.cjs

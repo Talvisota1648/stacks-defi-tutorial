@@ -39,7 +39,9 @@ def test_report_without_incident_and_archive_preserves_results(client, headers, 
     assert client.post('/api/v2/sources/'+src.id+'/reconnect',headers=headers).status_code==404
     assert client.get(endpoint,headers=headers).json()['source_name']=='Test camera'
     assert client.get(image_url,headers=headers).status_code==200
-    with db.transaction() as s:s.get(db.Job,job.id).created=time.time()-48*3600
+    with db.transaction() as s:
+        s.get(db.Job,job.id).created=time.time()-48*3600
+        saved=s.get(db.JobAnalysis,job.id);saved.result={**saved.result,'completed_at':time.time()-48*3600}
     cleanup()
     assert client.get(endpoint,headers=headers).status_code==410
     assert client.get(image_url,headers=headers).status_code==404
